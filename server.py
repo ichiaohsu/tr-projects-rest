@@ -1,13 +1,27 @@
 from datetime import datetime
 from eve import Eve
 from eve.auth import TokenAuth
-from flask import redirect, request, Response
+from flask import redirect, request, Response, g
 from settings import posts, ASSETS_URL, GCS_URL, ENV
 from werkzeug.security import check_password_hash
+from werkzeug.wsgi import DispatcherMiddleware
+
 import json
 import random
 import string
 import sys, getopt
+
+import time
+from prometheus_client import generate_latest, Counter, Histogram
+
+PROMETHEUS_CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8'
+
+http_request_count = Counter(
+    'http_request_total','HTTP request Total Count')
+
+http_request_latency = Histogram(
+    'http_request_latency_seconds', 'HTTP request latency',
+    ['endpoint'])
 
 class TokenAuth(TokenAuth):
     def check_auth(self, token, allowed_roles, resource, method):
@@ -28,7 +42,7 @@ def get_full_relateds(item, key):
         resp = tc.get('posts?where={"_id":{"$in":[' + all_relateds + ']}}', headers=headers)
         resp_data = json.loads(resp.data.decode("utf-8"))
         result = []
-        for i in item[key]: 
+        for i in item[key]:
             for j in resp_data['_items']:
                 if (type(i) is dict and str(j['_id']) == str(i['_id'])) or j['_id'] == str(i):
                     result.append(j)
@@ -164,7 +178,7 @@ def before_returning_listing(response):
             resp = tc.get('images?where={"_id":{"$in":["' + cover_photo + '"]}}', headers=headers)
             resp_data = json.loads(resp.data.decode("utf-8"))
             result = {x: resp_data['_items'][0][x] for x in ('image','_id','description','tags','createTime')}
-            
+
             item['heroVideo']['coverPhoto'] = result
         replace_imageurl(item)
     return response
@@ -208,6 +222,7 @@ def remove_extra_fields(item):
       del item[field]
 
 def pre_GET(resource, request, lookup):
+
     isCampaign = request.args.get('isCampaign')
     if resource == 'posts' or resource == 'meta':
         if isCampaign:
@@ -218,28 +233,61 @@ def pre_GET(resource, request, lookup):
         elif isCampaign is None:
             lookup.update({"isCampaign": False})
 
+    # Set starting time of a request
+    # g.start = time.time()
+    # Increase total http request count by 1
+    # http_request_count.inc()
+
 #app = Eve(auth=RolesAuth)
 
 if ENV == 'prod':
     app = Eve(auth=TokenAuth)
 else:
     app = Eve()
+
 app.on_replace_article += lambda item, original: remove_extra_fields(item)
 app.on_insert_article += lambda items: remove_extra_fields(items[0])
 app.on_insert_accounts += add_token
+
+# Trimming unneeded data fields, include extra data
 app.on_fetched_resource_posts += before_returning_posts
 app.on_fetched_resource_meta += before_returning_meta
 app.on_fetched_resource_listing += before_returning_listing
 app.on_fetched_resource_choices += before_returning_choices
 app.on_fetched_resource_sections += before_returning_sections
+
+# Used to identify Campaign
 app.on_pre_GET += pre_GET
+
+@app.before_request
+def start_request_latency_timer():
+    """
+    Inject request start time info in Flask request object.
+    Using Eve event hook could not get us the proper fields for current objects.
+    """
+    request.start = time.time()
+
+@app.after_request
+def stop_reqeust_latency_timer(response):
+    """
+    When the GET request about to finish,
+    stop the http request latency timer and create the latency metrics
+    """
+    resp_time = time.time() - request.start
+    http_request_count.inc()
+    http_request_latency.labels(request.path).observe(resp_time)
+    return response
+
+@app.route("/metrics")
+def metrics():
+    return Response(generate_latest(), mimetype=PROMETHEUS_CONTENT_TYPE)
 
 @app.route("/sections-featured", methods=['GET', 'POST'])
 def get_sections_latest():
     response = { "_items": {},
-                 "_links": { 
-                            "self": { "href":"sections-latest", "title": "sections latest"}, 
-                            "parent":{ "parend": "/", "title": "Home" } } }
+                 "_links": {
+                            "self": { "href":"sections-latest", "title": "sections latest"},
+                            "parent":{ "parent": "/", "title": "Home" } } }
     headers = dict(request.headers)
     content = request.args.get('content') or 'posts'
     tc = app.test_client()
@@ -263,8 +311,8 @@ def get_sections_latest():
                 for sec_item in sec_items:
                     replace_imageurl(sec_item)
                 response['_items'][item['name']] = sec_items['_items']
-    return Response(json.dumps(response), headers=resp_header)        
-        
+    return Response(json.dumps(response), headers=resp_header)
+
 @app.route("/timeline/<topicId>", methods=['GET'])
 def get_timeline(topicId):
     if topicId:
@@ -316,7 +364,7 @@ def get_timeline(topicId):
             replace_imageurl(node)
             if "activity" in node and "_id" in node["activity"] and node["activity"]["_id"] in activities:
                 node["activity"] = activities[node["activity"]["_id"]]
-        return Response(json.dumps(response), headers=resp_header)        
+        return Response(json.dumps(response), headers=resp_header)
     else:
         return {"error": "Objects not found"}, 404
 
@@ -324,9 +372,9 @@ def get_timeline(topicId):
 def handle_combo():
     endpoints = {'posts': '/posts?sort=-publishedDate&clean=content&where={"style":{"$nin":["projects", "readr"]}}', 'sectionfeatured': '/sections-featured?content=meta', 'choices': '/choices?max_results=1&sort=-pickDate',\
      'meta': '/meta?sort=-publishedDate&clean=content&related=full', 'sections': '/sections?sort=sortOrder&max_results=20', 'topics':'/topics?sort=sortOrder&max_results=12', 'posts-vue': '/listing?sort=-publishedDate&clean=content&max_results=20&related=false', 'projects': 'listing?where={"style":{"$in":["projects", "readr"]}}&sort=-publishedDate'}
-    response = { "_endpoints": {}, 
+    response = { "_endpoints": {},
                  "_links": {
-                            "self": { "href":"sections-latest", "title": "sections latest"}, 
+                            "self": { "href":"sections-latest", "title": "sections latest"},
                             "parent":{ "parent": "/", "title": "Home" } } }
     headers = dict(request.headers)
     tc = app.test_client()
@@ -344,13 +392,13 @@ def handle_combo():
                     response["_endpoints"][action] = {}
                     response["_endpoints"][action]['_items'] = action_data["_items"][0]["choices"]
                 else:
-                    response["_endpoints"][action] = action_data    
+                    response["_endpoints"][action] = action_data
                 for item in response["_endpoints"][action]["_items"]:
                     replace_imageurl(item)
     # If there is no request args for endpoint, set the header Content-Type to json
     if not ('Content-Type' in headers and headers['Content-Type'] == "application/json"):
-       headers['Content-Type'] = "application/json" 
-    return Response(json.dumps(response), headers=headers)        
+       headers['Content-Type'] = "application/json"
+    return Response(json.dumps(response), headers=headers)
 
 @app.route("/posts-alias", methods=['GET', 'POST'])
 def get_posts_byname():
@@ -362,7 +410,7 @@ def get_posts_byname():
     content = request.args.get('content')
     if content == 'meta':
         endpoint = 'meta'
-    else: 
+    else:
         endpoint = 'posts'
     if collection in allow_collections:
         if collection == 'categories':
@@ -382,7 +430,7 @@ def get_posts_byname():
             resp_data = json.loads(resp.data.decode("utf-8"))
             for i in resp_data['_items']:
                 replace_imageurl(i)
-            return Response(json.dumps(resp_data), headers=resp.headers)  
+            return Response(json.dumps(resp_data), headers=resp.headers)
         else:
             return r
     else:
