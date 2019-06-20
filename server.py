@@ -13,7 +13,7 @@ import sys, getopt
 import time
 import urllib.parse
 
-from middleware import MetricsMiddleware
+from helpers.metrics import MetricsMiddleware
 
 redis_read_port = int(REDIS_READ_PORT)
 redis_write_port = int(REDIS_WRITE_PORT)
