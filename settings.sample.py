@@ -7,16 +7,25 @@ OPTIMIZE_PAGINATION_FOR_SPEED = True
 # The assets url is for production
 ASSETS_URL = 'https://www.mirrormedia.com.tw/'
 GCS_URL = 'https://storage.googleapis.com/mirrormedia-dev/'
-ENV = 'dev'
+ENV = 'production'
 
 REDIS_WRITE_HOST = '127.0.0.1'
 REDIS_WRITE_PORT = 6379
 REDIS_READ_HOST = '127.0.0.1'
 REDIS_READ_PORT = 6379
-REDIS_AUTH = 'foo'
+REDIS_AUTH = ''
+
+GCP_LOGGING_CONFIG = {
+  'cluster_name': 'dev',
+  'container_name': 'tr-projects-rest',
+  'namespace_id': 'default',    
+  'project_id': 'mirrormedia-1470651750304',
+  'zone': 'asia-east1-a',
+  'type': "container",
+}
 
 # ALLOW ACTIONS
-DEBUG = False
+DEBUG = True
 ITEM_METHODS = ['GET', 'PATCH', 'PUT', 'DELETE'] if DEBUG else ['GET']
 
 slug_schema = {

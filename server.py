@@ -15,6 +15,10 @@ import urllib.parse
 
 from helpers.metrics import MetricsMiddleware
 
+from settings import DEBUG
+import logging
+
+
 redis_read_port = int(REDIS_READ_PORT)
 redis_write_port = int(REDIS_WRITE_PORT)
 redis_readPool = redis.ConnectionPool(host = REDIS_READ_HOST, port = redis_read_port, password = REDIS_AUTH)
@@ -370,31 +374,83 @@ def post_get_callback(resource, request, payload):
     p.start()
     p.join()
 
-#app = Eve(auth=RolesAuth)
-app = Eve()
 
-# Wrap app with metrics layer
-MetricsMiddleware(app)
+def create_app():
 
-# These two event hooks seems deprecated
-app.on_replace_article += lambda item, original: remove_extra_fields(item)
-app.on_insert_article += lambda items: remove_extra_fields(items[0])
+    #app = Eve(auth=RolesAuth)
+    app = Eve()
+    # Wrap app with metrics layer
+    MetricsMiddleware(app)
 
-# Before return json, refining data content for posts, albums, meta, listing, choices, topics, sections
-app.on_fetched_resource_posts += before_returning_posts
-app.on_fetched_resource_albums += before_returning_albums
-app.on_fetched_resource_meta += before_returning_meta
-app.on_fetched_resource_listing += before_returning_listing
-app.on_fetched_resource_choices += before_returning_choices
-app.on_fetched_resource_topics += before_returning_topics
-app.on_fetched_resource_sections += before_returning_sections
+    # These two event hooks seems deprecated
+    app.on_replace_article += lambda item, original: remove_extra_fields(item)
+    app.on_insert_article += lambda items: remove_extra_fields(items[0])
 
-# Grand scale modification
-app.on_pre_GET += pre_get_callback
-app.on_post_GET += post_get_callback
+    # Before return json, refining data content for posts, albums, meta, listing, choices, topics, sections
+    app.on_fetched_resource_posts += before_returning_posts
+    app.on_fetched_resource_albums += before_returning_albums
+    app.on_fetched_resource_meta += before_returning_meta
+    app.on_fetched_resource_listing += before_returning_listing
+    app.on_fetched_resource_choices += before_returning_choices
+    app.on_fetched_resource_topics += before_returning_topics
+    app.on_fetched_resource_sections += before_returning_sections
+
+    # Grand scale modification
+    app.on_pre_GET += pre_get_callback
+    app.on_post_GET += post_get_callback
+
+    app.logger.info("app.env:{}, app.debug:{}".format(app.env, app.debug))
+    if not app.DEBUG:
+        # app.logger.info("production mode!")
+
+        import google.cloud.logging as glogger
+        # from google.oauth2 import service_account
+        from google.cloud.logging.resource import Resource
+        import os
+        from settings import GCP_LOGGING_CONFIG
+        from google.cloud.logging.handlers import CloudLoggingHandler, setup_logging
+
+        res = Resource(
+            type = GCP_LOGGING_CONFIG['type'],
+            labels = {
+                'cluster_name': GCP_LOGGING_CONFIG['cluster_name'],
+                'container_name': GCP_LOGGING_CONFIG['container_name'],
+                'namespace_id': GCP_LOGGING_CONFIG['namespace_id'],
+                'project_id': GCP_LOGGING_CONFIG['project_id'],
+                'zone': GCP_LOGGING_CONFIG['zone'],
+                'type': GCP_LOGGING_CONFIG['type'],
+                'pod_id': os.environ['HOSTNAME']
+            },
+        )
+
+        # Use service account to send log to stackdriver
+        # credentials = service_account.Credentials.from_service_account_file('gcskeyfile.json')
+        # logging_client = glogger.Client(GCP_LOGGING_CONFIG['project_id'], credentials=credentials)
+        client = glogger.Client.from_service_account_json('gcskeyfile.json')
+        # client.setup_logging(log_level=logging.INFO, excluded_loggers=("werkzeug",))
+        handler = CloudLoggingHandler(client, name=GCP_LOGGING_CONFIG['container_name'], resource=res)
+        setup_logging(handler)
+        app.logger.setLevel(logging.INFO)
+
+        # cloud_logger = logging.getLogger(GCP_LOGGING_CONFIG['container_name'])
+        # cloud_logger.setLevel(logging.INFO)
+        # cloud_logger.addHandler(handler)
+
+        # logger.log_struct({'message':'Take protein pills','author':'Major Tom'}, resource=res)
+        # Use HOSTNAME as pod's name
+        # logging_client.setup_logging(logging.INFO)
+        # cloud_logger.info('hello service account')
+        # for logger in logging.getLogger():
+        #     print(logger)
+        app.logger.addHandler(handler)
+        # print(app.logger.handlers)
+    return app
+
+app = create_app()
 
 @app.route("/getlist", methods=['GET'])
 def get_list():
+    app.logger.warning('get list')
     headers = dict(request.headers)
     req = urllib.parse.unquote(request.full_path)
     fetch_req = req.replace('getlist', 'listing')
@@ -404,7 +460,7 @@ def get_list():
     listing_cached = redis_read.get(req)
     total_time = (time.time() - start)*1000
     if (total_time > 3):
-        print("get list from redis: " + str(total_time))
+        app.logger.info("get list from redis: " + str(total_time))
     if listing_cached is not None:
         cached_resp = json.loads(listing_cached)
         if "header" in cached_resp:
